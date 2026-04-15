@@ -179,12 +179,114 @@ pub fn cookie_args(cookie_file: Option<&str>, browser_native: Option<&str>) -> V
 pub fn build_format_string(resolution: &str, best_format_id: Option<&str>) -> String {
     if resolution == "best" {
         "bestvideo+bestaudio/best".to_string()
-    } else if let Some(fmt_id) = best_format_id {
+    } else if let Some(fmt_id) = best_format_id
+        && fmt_id != "best" {
         format!("{fmt_id}+bestaudio/best[height<={resolution}]")
     } else {
         format!(
             "bestvideo[height<={resolution}]+bestaudio/best[height<={resolution}]"
         )
+    }
+}
+
+/// Build format string from a specific format_id.
+pub fn build_format_string_from_id(format_id: &str) -> String {
+    if format_id == "best" {
+        "bestvideo+bestaudio/best".to_string()
+    } else {
+        format!("{format_id}+bestaudio/best")
+    }
+}
+
+/// Download with subtitle support.
+pub async fn download_with_subtitles(
+    url: &str,
+    cookie_args: &[String],
+    format: &str,
+    save_dir: &str,
+    audio_only: bool,
+    subtitle_langs: &str,
+) -> DownloadResult {
+    let yt_dlp = match find_yt_dlp() {
+        Some(cmd) => cmd,
+        None => {
+            return DownloadResult {
+                success: false,
+                log_lines: vec!["Error: yt-dlp not found".to_string()],
+                file_path: None,
+            };
+        }
+    };
+
+    let output_template = format!("{save_dir}/%(title)s [%(id)s].%(ext)s");
+
+    let mut cmd = Command::new(&yt_dlp[0]);
+    cmd.args(&yt_dlp[1..])
+        .arg("--newline")
+        .arg("--progress")
+        .arg("-o")
+        .arg(&output_template)
+        .arg("--merge-output-format")
+        .arg("mp4");
+
+    if audio_only {
+        cmd.arg("-x").arg("--audio-format").arg(format);
+    } else {
+        cmd.arg("-f").arg(format);
+    }
+
+    // Add subtitle arguments
+    if !subtitle_langs.is_empty() {
+        cmd.arg("--write-subs")
+            .arg("--write-auto-subs")
+            .arg("--sub-langs")
+            .arg(subtitle_langs);
+    }
+
+    cmd.args(cookie_args).arg(url);
+
+    let mut log_lines = Vec::new();
+    log_lines.push(format!("Command: {} ...", yt_dlp[0]));
+    log_lines.push("-".repeat(50));
+
+    let mut file_path = None;
+
+    match cmd.stdout(std::process::Stdio::piped()).spawn() {
+        Ok(mut child) => {
+            let stdout = child.stdout.take().unwrap();
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim_end().to_owned();
+                if !trimmed.is_empty() {
+                    log_lines.push(trimmed);
+                }
+            }
+
+            let status = child.wait().await;
+            let success = status.as_ref().is_ok_and(|s| s.success());
+
+            if success {
+                log_lines.push("-".repeat(50));
+                log_lines.push("Download complete!".to_string());
+                file_path = extract_file_path(&log_lines, save_dir);
+            } else {
+                let code = status.as_ref().ok().and_then(|s| s.code());
+                log_lines.push(format!("Download failed (exit code {code:?})"));
+            }
+
+            DownloadResult {
+                success,
+                log_lines,
+                file_path,
+            }
+        }
+        Err(e) => DownloadResult {
+            success: false,
+            log_lines: vec![format!("Failed to start download: {e}")],
+            file_path: None,
+        },
     }
 }
 

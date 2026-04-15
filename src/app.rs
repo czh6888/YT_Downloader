@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use iced::widget::{
     button, checkbox, column, container, horizontal_space, pick_list, progress_bar, row,
@@ -8,13 +11,15 @@ use iced::{Alignment, Element, Font, Length, Subscription, Task};
 use tokio::io::AsyncBufReadExt;
 
 use crate::downloader::{self, CookieResult, FormatInfo};
+use crate::config::Config;
+use crate::history::{HistoryEntry, HistoryManager};
+use crate::ui::format_dialog::{FormatDialog, FormatFilter};
 
 // ---------------------------------------------------------------------------
 // CJK Font
 // ---------------------------------------------------------------------------
 
-/// Create text with CJK font support (Microsoft YaHei).
-fn t<'a>(content: impl std::fmt::Display) -> iced::widget::Text<'a, iced::Theme> {
+fn cjk_text<'a>(content: impl std::fmt::Display) -> iced::widget::Text<'a, iced::Theme> {
     iced::widget::text(content.to_string()).font(Font::with_name("Microsoft YaHei"))
 }
 
@@ -43,16 +48,12 @@ impl Language {
     }
 }
 
-/// All localized strings in one place.
 pub struct Lang {
-    // Page titles
     pub page_title: &'static str,
-    // Sidebar
     pub sidebar_download: &'static str,
     pub sidebar_queue: &'static str,
     pub sidebar_history: &'static str,
     pub sidebar_settings: &'static str,
-    // Download page
     pub video_url_label: &'static str,
     pub video_url_hint: &'static str,
     pub browser_label: &'static str,
@@ -65,12 +66,12 @@ pub struct Lang {
     pub open_folder_btn: &'static str,
     pub resolution_label: &'static str,
     pub best_quality: &'static str,
-    // Status messages
+    pub select_format_btn: &'static str,
+    pub format_count_label: &'static str,
     pub status_idle: &'static str,
     pub status_extracting: &'static str,
     pub status_fetching: &'static str,
     pub status_ready: &'static str,
-    // Queue page
     pub queue_title: &'static str,
     pub queue_empty: &'static str,
     pub status_queued: &'static str,
@@ -80,10 +81,11 @@ pub struct Lang {
     pub status_cancelled: &'static str,
     pub status_failed: &'static str,
     pub cancel_btn: &'static str,
-    // History page
+    pub remove_btn: &'static str,
     pub history_title: &'static str,
     pub history_empty: &'static str,
-    // Settings page
+    pub history_search_hint: &'static str,
+    pub history_clear_btn: &'static str,
     pub settings_title: &'static str,
     pub language_label: &'static str,
     pub theme_label: &'static str,
@@ -91,6 +93,15 @@ pub struct Lang {
     pub download_dir_hint: &'static str,
     pub max_concurrent_label: &'static str,
     pub clipboard_cb: &'static str,
+    pub subtitles_label: &'static str,
+    pub subtitles_cb: &'static str,
+    pub subtitle_langs_label: &'static str,
+    pub subtitle_langs_hint: &'static str,
+    pub ffmpeg_label: &'static str,
+    pub ffmpeg_available: &'static str,
+    pub ffmpeg_missing: &'static str,
+    pub save_config_btn: &'static str,
+    pub config_saved: &'static str,
 }
 
 impl Lang {
@@ -102,7 +113,7 @@ impl Lang {
             sidebar_history: "History",
             sidebar_settings: "Settings",
             video_url_label: "Video URL",
-            video_url_hint: "https://www.youtube.com/watch?v=...",
+            video_url_hint: "https://www.youtube.com/watch?v=... or any yt-dlp supported site",
             browser_label: "Browser:",
             fetch_btn: "Fetch Info",
             audio_only_cb: "Audio only (extract audio track)",
@@ -113,6 +124,8 @@ impl Lang {
             open_folder_btn: "Open Download Folder",
             resolution_label: "Resolution:",
             best_quality: "Best quality",
+            select_format_btn: "Select Format",
+            format_count_label: "formats available",
             status_idle: "Ready",
             status_extracting: "Extracting browser cookies...",
             status_fetching: "Fetching video info...",
@@ -126,8 +139,11 @@ impl Lang {
             status_cancelled: "Cancelled",
             status_failed: "Failed",
             cancel_btn: "Cancel",
+            remove_btn: "Remove",
             history_title: "Download History",
             history_empty: "No downloads yet.",
+            history_search_hint: "Search history...",
+            history_clear_btn: "Clear History",
             settings_title: "Settings",
             language_label: "Language:",
             theme_label: "Theme:",
@@ -135,6 +151,15 @@ impl Lang {
             download_dir_hint: "Download path",
             max_concurrent_label: "Max Concurrent Downloads",
             clipboard_cb: "Monitor clipboard for video URLs",
+            subtitles_label: "Subtitles",
+            subtitles_cb: "Download subtitles when available",
+            subtitle_langs_label: "Subtitle Languages",
+            subtitle_langs_hint: "Comma-separated: zh-Hans,en",
+            ffmpeg_label: "FFmpeg",
+            ffmpeg_available: "Installed",
+            ffmpeg_missing: "Not found in PATH",
+            save_config_btn: "Save Settings",
+            config_saved: "Settings saved!",
         };
         static ZH: Lang = Lang {
             page_title: "YouTube 下载器",
@@ -143,7 +168,7 @@ impl Lang {
             sidebar_history: "历史",
             sidebar_settings: "设置",
             video_url_label: "视频链接",
-            video_url_hint: "https://www.youtube.com/watch?v=...",
+            video_url_hint: "https://www.youtube.com/watch?v=... 或任意 yt-dlp 支持的站点",
             browser_label: "浏览器：",
             fetch_btn: "获取信息",
             audio_only_cb: "仅音频（提取音轨）",
@@ -154,6 +179,8 @@ impl Lang {
             open_folder_btn: "打开下载文件夹",
             resolution_label: "分辨率：",
             best_quality: "最佳质量",
+            select_format_btn: "选择格式",
+            format_count_label: "个可用格式",
             status_idle: "就绪",
             status_extracting: "正在提取浏览器Cookie...",
             status_fetching: "正在获取视频信息...",
@@ -167,8 +194,11 @@ impl Lang {
             status_cancelled: "已取消",
             status_failed: "失败",
             cancel_btn: "取消",
+            remove_btn: "移除",
             history_title: "下载历史",
             history_empty: "暂无下载记录。",
+            history_search_hint: "搜索历史记录...",
+            history_clear_btn: "清空历史",
             settings_title: "设置",
             language_label: "语言：",
             theme_label: "主题：",
@@ -176,6 +206,15 @@ impl Lang {
             download_dir_hint: "下载路径",
             max_concurrent_label: "最大并发下载数",
             clipboard_cb: "自动检测剪贴板中的视频链接",
+            subtitles_label: "字幕",
+            subtitles_cb: "下载时自动获取字幕",
+            subtitle_langs_label: "字幕语言",
+            subtitle_langs_hint: "逗号分隔：zh-Hans,en",
+            ffmpeg_label: "FFmpeg",
+            ffmpeg_available: "已安装",
+            ffmpeg_missing: "PATH 中未找到",
+            save_config_btn: "保存设置",
+            config_saved: "设置已保存！",
         };
         match lang {
             Language::English => &EN,
@@ -188,7 +227,6 @@ impl Lang {
 // State
 // ---------------------------------------------------------------------------
 
-/// Downloadable page enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Page {
     #[default]
@@ -242,9 +280,7 @@ impl std::fmt::Display for Browser {
     }
 }
 
-/// A single download task in the queue.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DownloadTask {
     pub id: u64,
     pub url: String,
@@ -252,73 +288,64 @@ pub struct DownloadTask {
     pub format: String,
     pub audio_only: bool,
     pub status: TaskStatus,
-    pub progress: f64,      // 0.0 - 1.0
+    pub progress: f64,
     pub speed: String,
     pub eta: String,
     pub log: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum TaskStatus {
     Queued,
     Fetching,
     Downloading,
     Done,
+    Cancelled,
     Failed(String),
 }
 
-/// History entry.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct HistoryEntry {
-    pub title: String,
-    pub url: String,
-    pub format: String,
-    pub status: String,
-    pub date: String,
-    pub file_path: String,
-}
+type CancelFlags = Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>;
 
-/// Main application state.
 pub struct App {
-    // Navigation
     page: Page,
-
-    // Theme & Language
     pub theme: ThemeMode,
     pub language: Language,
 
-    // Download page
     url: String,
     browser: Browser,
     status: FetchStatus,
     formats: Vec<FormatInfo>,
-    selected_resolution: String,
+    selected_format_id: String,
     audio_only: bool,
     audio_format: AudioFormat,
     video_info_log: Vec<String>,
     save_dir: String,
 
-    // Cookie state
     cookie_file: String,
     cookie_result: Option<CookieResult>,
 
-    // Queue
     tasks: Vec<DownloadTask>,
     next_task_id: u64,
     max_concurrent: usize,
+    cancel_flags: CancelFlags,
 
-    // History
     history: Vec<HistoryEntry>,
+    history_mgr: Option<HistoryManager>,
+    history_search: String,
 
-    // Settings
     clipboard_monitor: bool,
     last_clipboard: String,
+
+    subtitles_enabled: bool,
+    subtitle_langs: String,
+
+    config: Config,
+    config_saved: bool,
+
+    format_dialog: FormatDialog,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 enum FetchStatus {
     Idle,
     ExtractingCookies,
@@ -346,34 +373,44 @@ impl std::fmt::Display for AudioFormat {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Message {
-    // Navigation
     NavigateTo(Page),
     ToggleTheme,
     ToggleLanguage,
 
-    // Download page
     UrlChanged(String),
     BrowserChanged(Browser),
     Fetch,
     FetchResult(Result<serde_json::Value, String>, CookieResult),
-    ResolutionSelected(String),
     AudioOnlyToggled(bool),
     AudioFormatChanged(AudioFormat),
 
-    // Queue actions
     Download,
     AddToQueue,
     CancelTask(u64),
+    RemoveTask(u64),
     TaskResult { id: u64, result: downloader::DownloadResult },
     TaskLog { id: u64, line: String },
 
-    // Settings
     SaveDirChanged(String),
     MaxConcurrentChanged(String),
     ClipboardToggled(bool),
     ClipboardCheck(String),
+
+    SubtitlesToggled(bool),
+    SubtitleLangsChanged(String),
+
+    SelectFormat,
+    FormatSelected(String),
+    CloseFormatDialog,
+    FormatDialogFilterChanged(FormatFilter),
+    FormatDialogSearchChanged(String),
+
+    HistorySearchChanged(String),
+    HistoryClear,
+
+    SaveConfig,
+    ConfigSaved(Result<(), String>),
 }
 
 // ---------------------------------------------------------------------------
@@ -382,42 +419,75 @@ pub enum Message {
 
 impl App {
     pub fn new() -> (Self, Task<Message>) {
-        let save_dir = dirs::video_dir()
-            .unwrap_or_else(|| PathBuf::from("C:\\Users\\CZH\\Videos"))
-            .to_string_lossy()
-            .to_string();
+        let config = Config::load();
+
+        let history_mgr = HistoryManager::new();
+        let history = history_mgr
+            .as_ref()
+            .map(|m| m.load_entries())
+            .unwrap_or_default();
+
+        let theme = match config.general.theme.as_str() {
+            "Dark" => ThemeMode::Dark,
+            _ => ThemeMode::Light,
+        };
+        let language = match config.general.language.as_str() {
+            "中文" => Language::Chinese,
+            _ => Language::English,
+        };
+
+        let save_dir = if !config.general.download_dir.is_empty() {
+            config.general.download_dir.clone()
+        } else {
+            dirs::video_dir()
+                .unwrap_or_else(|| PathBuf::from("C:\\Users\\CZH\\Videos"))
+                .to_string_lossy()
+                .to_string()
+        };
+
         let cookie_file = std::env::var("TEMP")
             .map(|t| format!("{t}\\yt_cookies.txt"))
             .unwrap_or_else(|_| "yt_cookies.txt".to_string());
 
-        (
-            App {
-                page: Page::default(),
-                theme: ThemeMode::default(),
-                language: Language::default(),
-                url: String::new(),
-                browser: Browser::Chrome,
-                status: FetchStatus::Idle,
-                formats: Vec::new(),
-                selected_resolution: "best".to_string(),
-                audio_only: false,
-                audio_format: AudioFormat::default(),
-                video_info_log: Vec::new(),
-                save_dir,
-                cookie_file,
-                cookie_result: None,
-                tasks: Vec::new(),
-                next_task_id: 1,
-                max_concurrent: 3,
-                history: Vec::new(),
-                clipboard_monitor: true,
-                last_clipboard: String::new(),
+        let app = App {
+            page: Page::default(),
+            theme,
+            language,
+            url: String::new(),
+            browser: Browser::Chrome,
+            status: FetchStatus::Idle,
+            formats: Vec::new(),
+            selected_format_id: "best".to_string(),
+            audio_only: false,
+            audio_format: match config.defaults.audio_format.as_str() {
+                "mp3" => AudioFormat::Mp3,
+                "flac" => AudioFormat::Flac,
+                "opus" => AudioFormat::Opus,
+                _ => AudioFormat::M4a,
             },
-            Task::none(),
-        )
+            video_info_log: Vec::new(),
+            save_dir,
+            cookie_file,
+            cookie_result: None,
+            tasks: Vec::new(),
+            next_task_id: 1,
+            max_concurrent: config.general.max_concurrent,
+            cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+            history,
+            history_mgr,
+            history_search: String::new(),
+            clipboard_monitor: config.general.clipboard_monitor,
+            last_clipboard: String::new(),
+            subtitles_enabled: config.defaults.subtitles_enabled,
+            subtitle_langs: config.defaults.subtitle_langs.clone(),
+            config,
+            config_saved: false,
+            format_dialog: FormatDialog::default(),
+        };
+
+        (app, Task::none())
     }
 
-    /// Get the current language's string bundle.
     fn lang(&self) -> &'static Lang {
         Lang::for_lang(self.language)
     }
@@ -427,23 +497,20 @@ impl App {
             Message::NavigateTo(page) => {
                 self.page = page;
             }
-
             Message::ToggleTheme => {
                 self.theme = self.theme.toggle();
+                self.config.general.theme = self.theme.label().to_string();
             }
-
             Message::ToggleLanguage => {
                 self.language = self.language.toggle();
+                self.config.general.language = self.language.label().to_string();
             }
-
             Message::UrlChanged(url) => {
                 self.url = url;
             }
-
             Message::BrowserChanged(browser) => {
                 self.browser = browser;
             }
-
             Message::Fetch => {
                 if self.url.trim().is_empty() {
                     return Task::none();
@@ -458,30 +525,23 @@ impl App {
 
                 return Task::perform(
                     async move {
-                        // Step 1: Extract cookies
                         let cookie_result =
                             downloader::extract_browser_cookies(&browser_name, &cookie_file);
                         let (cookie_file_opt, browser_native_opt) =
                             cookie_args_from_result(&cookie_result);
-
-                        // Step 2: Fetch video info
                         let cookie_args = downloader::cookie_args(cookie_file_opt.as_deref(), browser_native_opt.as_deref());
                         let info = downloader::fetch_info(&url, &cookie_args).await;
-
                         match info {
                             Ok(v) => Ok((v, cookie_result)),
                             Err(e) => Err((e.to_string(), cookie_result)),
                         }
                     },
                     |result| match result {
-                        Ok((_info, cookie_result)) => {
-                            Message::FetchResult(Ok(_info), cookie_result)
-                        }
+                        Ok((info, cookie_result)) => Message::FetchResult(Ok(info), cookie_result),
                         Err((e, cookie_result)) => Message::FetchResult(Err(e), cookie_result),
                     },
                 );
             }
-
             Message::FetchResult(Ok(info), cookie_result) => {
                 self.formats = downloader::parse_formats(&info);
                 let title = info
@@ -489,35 +549,26 @@ impl App {
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown")
                     .to_string();
-                self.selected_resolution = "best".to_string();
+                self.selected_format_id = "best".to_string();
                 self.status = FetchStatus::Ready;
                 self.video_info_log.push(format!("Title: {title}"));
                 self.video_info_log.push(format!("Found {} formats", self.formats.len()));
                 self.video_info_log.push(format!("Cookie: {}", cookie_result.message));
-
-                // Store cookie result for download
                 self.cookie_result = Some(cookie_result);
             }
-
             Message::FetchResult(Err(e), cookie_result) => {
                 self.status = FetchStatus::Idle;
                 self.video_info_log.push(format!("Error: {e}"));
                 self.video_info_log.push(format!("Cookie: {}", cookie_result.message));
                 self.cookie_result = Some(cookie_result);
             }
-
-            Message::ResolutionSelected(res) => {
-                self.selected_resolution = res;
-            }
-
             Message::AudioOnlyToggled(val) => {
                 self.audio_only = val;
             }
-
             Message::AudioFormatChanged(fmt) => {
                 self.audio_format = fmt;
+                self.config.defaults.audio_format = fmt.to_string();
             }
-
             Message::Download | Message::AddToQueue => {
                 if self.url.trim().is_empty() {
                     return Task::none();
@@ -531,11 +582,21 @@ impl App {
                     TaskStatus::Queued
                 };
 
+                let format_label = if self.selected_format_id == "best" {
+                    "best".to_string()
+                } else {
+                    self.formats
+                        .iter()
+                        .find(|f| f.format_id == self.selected_format_id)
+                        .map(|f| f.resolution.clone())
+                        .unwrap_or_else(|| self.selected_format_id.clone())
+                };
+
                 let task = DownloadTask {
                     id,
                     url: self.url.clone(),
                     title: self.video_info_log.first().cloned().unwrap_or_default(),
-                    format: self.selected_resolution.clone(),
+                    format: format_label,
                     audio_only: self.audio_only,
                     status,
                     progress: 0.0,
@@ -549,40 +610,65 @@ impl App {
                     return self.start_download(id);
                 }
             }
-
             Message::CancelTask(id) => {
-                if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
-                    task.status = TaskStatus::Failed("Cancelled".to_string());
+                // Set cancel flag
+                {
+                    let flags = self.cancel_flags.lock().unwrap();
+                    if let Some(flag) = flags.get(&id) {
+                        flag.store(true, Ordering::SeqCst);
+                    }
                 }
+                if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+                    task.status = TaskStatus::Cancelled;
+                }
+                return self.process_queue();
             }
-
+            Message::RemoveTask(id) => {
+                self.tasks.retain(|t| t.id != id);
+            }
             Message::TaskResult { id, result } => {
                 if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
-                    task.log.extend(result.log_lines.clone());
-                    if result.success {
+                    let was_cancelled = {
+                        let flags = self.cancel_flags.lock().unwrap();
+                        flags.get(&id).map(|f| f.load(Ordering::SeqCst)).unwrap_or(false)
+                    };
+
+                    if was_cancelled {
+                        task.status = TaskStatus::Cancelled;
+                    } else if result.success {
                         task.status = TaskStatus::Done;
                         task.progress = 1.0;
-                        // Add to history
+                        let title = task.title.strip_prefix("Title: ")
+                            .unwrap_or(&task.title).to_string();
+                        let file_path = result.file_path.clone().unwrap_or_default();
+                        let entry_id = if let Some(mgr) = &self.history_mgr {
+                            mgr.add_entry(&title, &task.url, &task.format, "Completed", &file_path).ok()
+                        } else {
+                            None
+                        };
                         self.history.insert(0, HistoryEntry {
-                            title: task.title.clone(),
+                            id: entry_id.unwrap_or(0),
+                            title: title.clone(),
                             url: task.url.clone(),
                             format: task.format.clone(),
                             status: "Completed".to_string(),
                             date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
-                            file_path: result.file_path.unwrap_or_default(),
+                            file_path: file_path.clone(),
                         });
                     } else {
                         task.status = TaskStatus::Failed("Download failed".to_string());
                     }
+                    {
+                        let mut flags = self.cancel_flags.lock().unwrap();
+                        flags.remove(&id);
+                    }
                     // Start next queued task
-                    self.process_queue();
+                    return self.process_queue();
                 }
             }
-
             Message::TaskLog { id, line } => {
                 if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
                     task.log.push(line.clone());
-                    // Try to parse progress
                     if let Some(prog) = downloader::parse_progress(&line) {
                         task.progress = prog.percentage / 100.0;
                         task.speed = format_speed(prog.speed);
@@ -590,56 +676,108 @@ impl App {
                     }
                 }
             }
-
             Message::SaveDirChanged(dir) => {
-                self.save_dir = dir;
+                self.save_dir = dir.clone();
+                self.config.general.download_dir = dir;
             }
-
             Message::MaxConcurrentChanged(val) => {
                 if let Ok(n) = val.parse::<usize>()
                     && n > 0 && n <= 10 {
                         self.max_concurrent = n;
+                        self.config.general.max_concurrent = n;
                     }
             }
-
             Message::ClipboardToggled(val) => {
                 self.clipboard_monitor = val;
+                self.config.general.clipboard_monitor = val;
             }
-
             Message::ClipboardCheck(content) => {
                 if self.clipboard_monitor && !content.is_empty() && content != self.last_clipboard {
-                    // Check if it looks like a video URL
                     if is_video_url(&content) {
                         self.last_clipboard = content.clone();
                         self.url = content;
                     }
                 }
             }
+            Message::SubtitlesToggled(val) => {
+                self.subtitles_enabled = val;
+                self.config.defaults.subtitles_enabled = val;
+            }
+            Message::SubtitleLangsChanged(langs) => {
+                self.subtitle_langs = langs.clone();
+                self.config.defaults.subtitle_langs = langs;
+            }
+            Message::SelectFormat => {
+                let current = self.selected_format_id.clone();
+                self.format_dialog.open(&current);
+            }
+            Message::FormatSelected(format_id) => {
+                self.selected_format_id = format_id;
+                self.format_dialog.close();
+            }
+            Message::CloseFormatDialog => {
+                self.format_dialog.close();
+            }
+            Message::FormatDialogFilterChanged(filter) => {
+                self.format_dialog.filter = filter;
+            }
+            Message::FormatDialogSearchChanged(text) => {
+                self.format_dialog.search = text;
+            }
+            Message::HistorySearchChanged(text) => {
+                self.history_search = text;
+            }
+            Message::HistoryClear => {
+                self.history.clear();
+                self.history_search.clear();
+                if let Some(mgr) = &self.history_mgr {
+                    let _ = mgr.clear_all();
+                }
+            }
+            Message::SaveConfig => {
+                let config = self.config.clone();
+                return Task::perform(
+                    async move { config.save() },
+                    Message::ConfigSaved,
+                );
+            }
+            Message::ConfigSaved(Ok(_)) => {
+                self.config_saved = true;
+            }
+            Message::ConfigSaved(Err(_)) => {}
         }
         Task::none()
     }
 
-    /// Start a download and stream progress updates live.
     fn start_download(&self, id: u64) -> Task<Message> {
         let url = self.url.clone();
-        let format = self.selected_resolution.clone();
+        let format_id = self.selected_format_id.clone();
         let save_dir = self.save_dir.clone();
         let audio_only = self.audio_only;
         let audio_format = self.audio_format.to_string();
         let browser = self.browser.to_string();
         let cookie_file = self.cookie_file.clone();
         let cookie_result = self.cookie_result.clone();
+        let subtitles_enabled = self.subtitles_enabled;
+        let subtitle_langs = self.subtitle_langs.clone();
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut flags = self.cancel_flags.lock().unwrap();
+            flags.insert(id, cancel_flag.clone());
+        }
 
         Task::stream(iced::stream::channel(16, move |mut output| {
             let url = url.clone();
-            let format = format.clone();
+            let format_id = format_id.clone();
             let save_dir = save_dir.clone();
             let cookie_file = cookie_file.clone();
             let cookie_result = cookie_result.clone();
             let browser = browser.clone();
+            let subtitle_langs = subtitle_langs.clone();
+            let cancel_flag = cancel_flag.clone();
 
             async move {
-                // Get cookie args
                 let (cookie_file_opt, browser_native_opt) = cookie_result
                     .as_ref()
                     .map(|cr| cookie_args_from_result(cr))
@@ -654,7 +792,7 @@ impl App {
                 let format_str = if audio_only {
                     format!("-x --audio-format {audio_format}")
                 } else {
-                    downloader::build_format_string(&format, None)
+                    downloader::build_format_string_from_id(&format_id)
                 };
 
                 let yt_dlp = match downloader::find_yt_dlp() {
@@ -689,6 +827,13 @@ impl App {
                     cmd.arg("-f").arg(&format_str);
                 }
 
+                if subtitles_enabled && !subtitle_langs.is_empty() {
+                    cmd.arg("--write-subs")
+                       .arg("--write-auto-subs")
+                       .arg("--sub-langs")
+                       .arg(&subtitle_langs);
+                }
+
                 cmd.args(&cookie_args).arg(&url);
 
                 let mut log_lines = Vec::new();
@@ -701,13 +846,46 @@ impl App {
                         let reader = tokio::io::BufReader::new(stdout);
                         let mut lines = reader.lines();
 
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            let trimmed = line.trim_end().to_owned();
-                            if !trimmed.is_empty() {
-                                log_lines.push(trimmed.clone());
-                                // Stream each line to UI for live progress
-                                let _ = output.try_send(Message::TaskLog { id, line: trimmed });
+                        loop {
+                            if cancel_flag.load(Ordering::SeqCst) {
+                                let _ = child.kill().await;
+                                log_lines.push("-".repeat(50));
+                                log_lines.push("Download cancelled".to_string());
+                                let _ = output.try_send(Message::TaskResult {
+                                    id,
+                                    result: downloader::DownloadResult {
+                                        success: false,
+                                        log_lines,
+                                        file_path: None,
+                                    },
+                                });
+                                return;
                             }
+
+                            match lines.next_line().await {
+                                Ok(Some(line)) => {
+                                    let trimmed = line.trim_end().to_owned();
+                                    if !trimmed.is_empty() {
+                                        log_lines.push(trimmed.clone());
+                                        let _ = output.try_send(Message::TaskLog { id, line: trimmed });
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(_) => break,
+                            }
+                        }
+
+                        if cancel_flag.load(Ordering::SeqCst) {
+                            log_lines.push("Download cancelled".to_string());
+                            let _ = output.try_send(Message::TaskResult {
+                                id,
+                                result: downloader::DownloadResult {
+                                    success: false,
+                                    log_lines,
+                                    file_path: None,
+                                },
+                            });
+                            return;
                         }
 
                         let status = child.wait().await;
@@ -745,7 +923,7 @@ impl App {
         }))
     }
 
-    fn process_queue(&mut self) {
+    fn process_queue(&mut self) -> Task<Message> {
         let active_count = self
             .tasks
             .iter()
@@ -758,14 +936,16 @@ impl App {
                 .iter()
                 .position(|t| matches!(t.status, TaskStatus::Queued))
             {
-                self.tasks[pos].status = TaskStatus::Fetching;
+                let id = self.tasks[pos].id;
+                self.tasks[pos].status = TaskStatus::Downloading;
+                return self.start_download(id);
             }
+        Task::none()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
         if self.clipboard_monitor {
             iced::time::every(std::time::Duration::from_secs(2)).map(|_| {
-                // Clipboard check
                 Message::ClipboardCheck(
                     arboard::Clipboard::new()
                         .ok()
@@ -782,7 +962,6 @@ impl App {
     // Views
     // -----------------------------------------------------------------------
 
-    /// Localized page label.
     fn page_label(&self, page: Page) -> &'static str {
         let l = self.lang();
         match page {
@@ -796,7 +975,6 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let is_dark = matches!(self.theme, ThemeMode::Dark);
 
-        let sidebar = self.sidebar_view(is_dark);
         let content = match self.page {
             Page::Download => self.download_view(is_dark),
             Page::Queue => self.queue_view(is_dark),
@@ -804,15 +982,34 @@ impl App {
             Page::Settings => self.settings_view(is_dark),
         };
 
-        row![
+        let sidebar = self.sidebar_view(is_dark);
+
+        let main = row![
             sidebar,
             container(content)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .padding(16),
         ]
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill);
+
+        if self.format_dialog.open && !self.formats.is_empty() {
+            let dialog = self.format_dialog.view(
+                &self.formats,
+                Message::FormatSelected,
+                || Message::CloseFormatDialog,
+                Message::FormatDialogFilterChanged,
+                Message::FormatDialogSearchChanged,
+            );
+
+            iced::widget::stack![
+                main,
+                dialog,
+            ]
+            .into()
+        } else {
+            main.into()
+        }
     }
 
     fn sidebar_view(&self, is_dark: bool) -> Element<'_, Message> {
@@ -828,7 +1025,7 @@ impl App {
         for page in pages {
             let label = self.page_label(page);
             let is_active = page == self.page;
-            let btn = button(t(label).size(14))
+            let btn = button(cjk_text(label).size(14))
                 .padding(10)
                 .width(Length::Fill)
                 .on_press(Message::NavigateTo(page));
@@ -864,15 +1061,11 @@ impl App {
         let l = self.lang();
         let mut col = Column::new().spacing(16).padding(8);
 
-        // Title
-        col = col.push(
-            t(l.page_title).size(22),
-        );
+        col = col.push(cjk_text(l.page_title).size(22));
 
-        // URL Input
         col = col.push(
             column![
-                t(l.video_url_label).size(14),
+                cjk_text(l.video_url_label).size(14),
                 text_input(l.video_url_hint, &self.url)
                     .on_input(Message::UrlChanged)
                     .on_submit(Message::Fetch)
@@ -882,18 +1075,16 @@ impl App {
             .spacing(4),
         );
 
-        // Browser selection
         col = col.push(self.browser_row());
 
-        // Fetch button
         let is_fetching = !matches!(self.status, FetchStatus::Idle | FetchStatus::Ready);
         let fetch_btn: Element<'_, Message> = if is_fetching {
-            button(t(l.fetch_btn).size(14))
+            button(cjk_text(l.fetch_btn).size(14))
                 .padding(10)
                 .width(Length::Fixed(150.0))
                 .into()
         } else {
-            button(t(l.fetch_btn).size(14))
+            button(cjk_text(l.fetch_btn).size(14))
                 .padding(10)
                 .width(Length::Fixed(150.0))
                 .on_press(Message::Fetch)
@@ -901,18 +1092,16 @@ impl App {
         };
         col = col.push(fetch_btn);
 
-        // Status
         let status_text = match &self.status {
             FetchStatus::Idle => l.status_idle,
             FetchStatus::ExtractingCookies => l.status_extracting,
             FetchStatus::Fetching => l.status_fetching,
             FetchStatus::Ready => l.status_ready,
         };
-        col = col.push(t(status_text).size(12).color(iced::Color {
+        col = col.push(cjk_text(status_text).size(12).color(iced::Color {
             r: 0.56, g: 0.56, b: 0.58, a: 1.0,
         }));
 
-        // Audio-only toggle
         col = col.push(
             checkbox(l.audio_only_cb, self.audio_only)
                 .on_toggle(Message::AudioOnlyToggled)
@@ -920,11 +1109,10 @@ impl App {
         );
 
         if self.audio_only {
-            // Audio format selection
             let fmts = [AudioFormat::Mp3, AudioFormat::M4a, AudioFormat::Flac, AudioFormat::Opus];
             col = col.push(
                 row![
-                    t(l.audio_format_label).size(13),
+                    cjk_text(l.audio_format_label).size(13),
                     pick_list(fmts, Some(self.audio_format), Message::AudioFormatChanged)
                         .padding(6),
                 ]
@@ -932,22 +1120,52 @@ impl App {
                 .align_y(Alignment::Center),
             );
         } else {
-            // Resolution selection
             if !self.formats.is_empty() || matches!(self.status, FetchStatus::Ready) {
-                col = col.push(self.resolution_section());
+                let video_count = self.formats.iter().filter(|f| f.is_video).count();
+                let audio_count = self.formats.iter().filter(|f| f.is_audio).count();
+
+                let current_label = if self.selected_format_id == "best" {
+                    l.best_quality.to_string()
+                } else {
+                    self.formats
+                        .iter()
+                        .find(|f| f.format_id == self.selected_format_id)
+                        .map(|f| f.resolution.clone())
+                        .unwrap_or_else(|| self.selected_format_id.clone())
+                };
+
+                col = col.push(
+                    column![
+                        row![
+                            cjk_text(l.resolution_label).size(14),
+                            cjk_text(format!("({} {} | {} audio)", video_count, l.format_count_label, audio_count))
+                                .size(11)
+                                .color(iced::Color { r: 0.56, g: 0.56, b: 0.58, a: 1.0 }),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                        row![
+                            button(cjk_text(format!("{current_label} ▼")).size(13))
+                                .padding(10)
+                                .width(Length::Fixed(200.0))
+                                .on_press(Message::SelectFormat),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(6),
+                );
             }
         }
 
-        // Action buttons
         let can_download = matches!(self.status, FetchStatus::Ready) || !self.url.is_empty();
         let mut action_row = row![].spacing(12);
         action_row = action_row.push(
-            button(t(l.download_now_btn).size(14))
+            button(cjk_text(l.download_now_btn).size(14))
                 .padding(10)
                 .on_press(Message::Download),
         );
         action_row = action_row.push(
-            button(t(l.add_to_queue_btn).size(14))
+            button(cjk_text(l.add_to_queue_btn).size(14))
                 .padding(10)
                 .on_press(Message::AddToQueue),
         );
@@ -955,14 +1173,12 @@ impl App {
             col = col.push(action_row);
         }
 
-        // Video info log
         if !self.video_info_log.is_empty() {
             col = col.push(self.info_log_view(is_dark));
         }
 
-        // Download folder
         col = col.push(
-            button(t(l.open_folder_btn).size(13))
+            button(cjk_text(l.open_folder_btn).size(13))
                 .padding(8)
                 .on_press(Message::SaveDirChanged(self.save_dir.clone())),
         );
@@ -974,10 +1190,10 @@ impl App {
         let l = self.lang();
         let browsers = [Browser::Chrome, Browser::Edge, Browser::Firefox];
         let mut r = row![].spacing(16).align_y(Alignment::Center);
-        r = r.push(t(l.browser_label).size(13));
+        r = r.push(cjk_text(l.browser_label).size(13));
         for browser in browsers {
             let is_selected = browser == self.browser;
-            let btn = button(t(browser.to_string()).size(13))
+            let btn = button(cjk_text(browser.to_string()).size(13))
                 .padding(6)
                 .on_press(Message::BrowserChanged(browser));
             let btn = if is_selected {
@@ -997,64 +1213,6 @@ impl App {
         column![].push(r)
     }
 
-    fn resolution_section(&self) -> Column<'_, Message> {
-        let l = self.lang();
-        let mut col = Column::new().spacing(4);
-        col = col.push(t(l.resolution_label).size(14));
-
-        // Best option
-        let best_btn = button(t(l.best_quality).size(12))
-            .padding(8)
-            .width(Length::Fill)
-            .on_press(Message::ResolutionSelected("best".to_string()));
-        let best_btn = if self.selected_resolution == "best" {
-            best_btn.style(|_, _| button::Style {
-                background: Some(iced::Background::Color(iced::Color {
-                    r: 0.0, g: 0.47, b: 1.0, a: 1.0,
-                })),
-                text_color: iced::Color::WHITE,
-                border: iced::border::rounded(6),
-                ..Default::default()
-            })
-        } else {
-            best_btn
-        };
-        col = col.push(best_btn);
-
-        // Video resolutions
-        let mut seen = std::collections::HashSet::new();
-        for fmt in &self.formats {
-            if !fmt.is_video { continue; }
-            let Some(h) = fmt.height else { continue; };
-            if !seen.insert(h) { continue; }
-
-            let mut label = fmt.resolution.clone();
-            if let Some(fps) = fmt.fps
-                && fps > 30.0 { label.push_str(&format!(" {fps}fps")); }
-            if fmt.note.to_lowercase().contains("hdr") { label.push_str(" HDR"); }
-
-            let h_str = h.to_string();
-            let is_sel = self.selected_resolution == h_str;
-            let btn = button(t(label).size(12))
-                .padding(8)
-                .width(Length::Fill)
-                .on_press(Message::ResolutionSelected(h_str));
-            let btn = if is_sel {
-                btn.style(|_, _| button::Style {
-                    background: Some(iced::Background::Color(iced::Color {
-                        r: 0.0, g: 0.47, b: 1.0, a: 1.0,
-                    })),
-                    text_color: iced::Color::WHITE,
-                    border: iced::border::rounded(6),
-                    ..Default::default()
-                })
-            } else { btn };
-            col = col.push(btn);
-        }
-
-        col
-    }
-
     fn info_log_view(&self, is_dark: bool) -> Column<'_, Message> {
         let l = self.lang();
         let bg = if is_dark {
@@ -1070,8 +1228,8 @@ impl App {
 
         let content = self.video_info_log.join("\n");
         column![
-            t(l.info_label).size(14),
-            container(t(content).size(11).font(Font::MONOSPACE).color(fg))
+            cjk_text(l.info_label).size(14),
+            container(cjk_text(content).size(11).font(Font::MONOSPACE).color(fg))
                 .padding(12)
                 .width(Length::Fill)
                 .height(Length::Fixed(80.0))
@@ -1087,11 +1245,11 @@ impl App {
     fn queue_view(&self, is_dark: bool) -> Element<'_, Message> {
         let l = self.lang();
         let mut col = Column::new().spacing(12).padding(8);
-        col = col.push(t(l.queue_title).size(20));
+        col = col.push(cjk_text(l.queue_title).size(20));
 
         if self.tasks.is_empty() {
             col = col.push(
-                t(l.queue_empty)
+                cjk_text(l.queue_empty)
                     .size(13)
                     .color(iced::Color { r: 0.56, g: 0.56, b: 0.58, a: 1.0 }),
             );
@@ -1116,6 +1274,7 @@ impl App {
             TaskStatus::Queued => "[Q]",
             TaskStatus::Fetching | TaskStatus::Downloading => "[D]",
             TaskStatus::Done => "[OK]",
+            TaskStatus::Cancelled => "[C]",
             TaskStatus::Failed(_) => "[X]",
         };
 
@@ -1126,6 +1285,7 @@ impl App {
                 format!("{} {:.0}% | {} | ETA: {}", l.status_downloading, task.progress * 100.0, task.speed, task.eta)
             }
             TaskStatus::Done => l.status_done.to_string(),
+            TaskStatus::Cancelled => l.status_cancelled.to_string(),
             TaskStatus::Failed(e) => format!("{}: {e}", l.status_failed),
         };
 
@@ -1135,24 +1295,29 @@ impl App {
             task.title.clone()
         };
 
+        let action_btn: Element<'_, Message> = match &task.status {
+            TaskStatus::Downloading | TaskStatus::Fetching => {
+                button(cjk_text(l.cancel_btn).size(11))
+                    .padding(4)
+                    .on_press(Message::CancelTask(task.id))
+                    .into()
+            }
+            TaskStatus::Done | TaskStatus::Cancelled | TaskStatus::Failed(_) | TaskStatus::Queued => {
+                button(cjk_text(l.remove_btn).size(11))
+                    .padding(4)
+                    .on_press(Message::RemoveTask(task.id))
+                    .into()
+            }
+        };
+
         let mut content = column![
             row![
-                t(format!("{status_icon} {title_text}")).size(13),
+                cjk_text(format!("{status_icon} {title_text}")).size(13),
                 horizontal_space(),
-                {
-                    let cancel_btn: Element<'_, Message> = if matches!(task.status, TaskStatus::Downloading | TaskStatus::Fetching) {
-                        button(t(l.cancel_btn).size(11))
-                            .padding(4)
-                            .on_press(Message::CancelTask(task.id))
-                            .into()
-                    } else {
-                        button(t("X").size(11)).padding(4).into()
-                    };
-                    cancel_btn
-                },
+                action_btn,
             ]
             .spacing(8),
-            t(status_text).size(11).color(iced::Color { r: 0.56, g: 0.56, b: 0.58, a: 1.0 }),
+            cjk_text(status_text).size(11).color(iced::Color { r: 0.56, g: 0.56, b: 0.58, a: 1.0 }),
         ];
 
         if matches!(task.status, TaskStatus::Downloading) {
@@ -1173,21 +1338,40 @@ impl App {
     fn history_view(&self, _is_dark: bool) -> Element<'_, Message> {
         let l = self.lang();
         let mut col = Column::new().spacing(12).padding(8);
-        col = col.push(t(l.history_title).size(20));
+        col = col.push(cjk_text(l.history_title).size(20));
 
-        if self.history.is_empty() {
+        col = col.push(
+            text_input(l.history_search_hint, &self.history_search)
+                .on_input(Message::HistorySearchChanged)
+                .padding(8)
+                .size(13),
+        );
+
+        let filtered = if self.history_search.is_empty() {
+            self.history.clone()
+        } else if let Some(mgr) = &self.history_mgr {
+            mgr.search_entries(&self.history_search)
+        } else {
+            self.history.iter()
+                .filter(|e| e.title.to_lowercase().contains(&self.history_search.to_lowercase())
+                    || e.url.to_lowercase().contains(&self.history_search.to_lowercase()))
+                .cloned()
+                .collect()
+        };
+
+        if filtered.is_empty() {
             col = col.push(
-                t(l.history_empty).size(13).color(iced::Color {
+                cjk_text(l.history_empty).size(13).color(iced::Color {
                     r: 0.56, g: 0.56, b: 0.58, a: 1.0,
                 }),
             );
         } else {
-            for entry in &self.history {
+            for entry in &filtered {
                 col = col.push(
                     row![
                         column![
-                            t(&entry.title).size(13),
-                            t(format!("{} | {} | {}", entry.date, entry.format, entry.status))
+                            cjk_text(&entry.title).size(13),
+                            cjk_text(format!("{} | {} | {}", entry.date, entry.format, entry.status))
                                 .size(11)
                                 .color(iced::Color { r: 0.56, g: 0.56, b: 0.58, a: 1.0 }),
                         ],
@@ -1196,6 +1380,14 @@ impl App {
                     .spacing(8),
                 );
             }
+        }
+
+        if !filtered.is_empty() {
+            col = col.push(
+                button(cjk_text(l.history_clear_btn).size(13))
+                    .padding(8)
+                    .on_press(Message::HistoryClear),
+            );
         }
 
         container(scrollable(col)).height(Length::Fill).into()
@@ -1209,105 +1401,141 @@ impl App {
             iced::Color { r: 0.95, g: 0.95, b: 0.97, a: 1.0 }
         };
 
-        let mut col = Column::new().spacing(16).padding(8);
-        col = col.push(t(l.settings_title).size(20));
+        fn card<'a>(content: Element<'a, Message>, bg: iced::Color) -> Element<'a, Message> {
+            container(content)
+                .padding(16)
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::border::rounded(8),
+                    ..Default::default()
+                })
+                .into()
+        }
 
-        // Language switch
-        col = col.push(
-            container(
+        let mut col = Column::new().spacing(16).padding(8);
+        col = col.push(cjk_text(l.settings_title).size(20));
+
+        col = col.push(card(
                 row![
-                    t(l.language_label).size(14),
-                    button(t(self.language.label()).size(13))
+                    cjk_text(l.language_label).size(14),
+                    button(cjk_text(self.language.label()).size(13))
                         .padding(8)
                         .on_press(Message::ToggleLanguage),
                 ]
                 .spacing(12)
-                .align_y(Alignment::Center),
-            )
-            .padding(16)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(bg)),
-                border: iced::border::rounded(8),
-                ..Default::default()
-            }),
+                .align_y(Alignment::Center)
+                .into(),
+                bg,
+            ),
         );
 
-        // Theme
-        col = col.push(
-            container(
+        col = col.push(card(
                 row![
-                    t(l.theme_label).size(14),
-                    button(t(self.theme.label()).size(13))
+                    cjk_text(l.theme_label).size(14),
+                    button(cjk_text(self.theme.label()).size(13))
                         .padding(8)
                         .on_press(Message::ToggleTheme),
                 ]
                 .spacing(12)
-                .align_y(Alignment::Center),
-            )
-            .padding(16)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(bg)),
-                border: iced::border::rounded(8),
-                ..Default::default()
-            }),
+                .align_y(Alignment::Center)
+                .into(),
+                bg,
+            ),
         );
 
-        // Download directory
-        col = col.push(
-            container(
+        col = col.push(card(
                 column![
-                    t(l.download_dir_label).size(14),
+                    cjk_text(l.download_dir_label).size(14),
                     text_input(l.download_dir_hint, &self.save_dir)
                         .on_input(Message::SaveDirChanged)
                         .padding(8),
                 ]
-                .spacing(8),
-            )
-            .padding(16)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(bg)),
-                border: iced::border::rounded(8),
-                ..Default::default()
-            }),
+                .spacing(8)
+                .into(),
+                bg,
+            ),
         );
 
-        // Max concurrent downloads
-        col = col.push(
-            container(
+        col = col.push(card(
                 column![
-                    t(l.max_concurrent_label).size(14),
+                    cjk_text(l.max_concurrent_label).size(14),
                     text_input("3", &self.max_concurrent.to_string())
                         .on_input(Message::MaxConcurrentChanged)
                         .padding(8),
                 ]
-                .spacing(8),
-            )
-            .padding(16)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(bg)),
-                border: iced::border::rounded(8),
-                ..Default::default()
-            }),
+                .spacing(8)
+                .into(),
+                bg,
+            ),
         );
 
-        // Clipboard monitor
-        col = col.push(
-            container(
+        col = col.push(card(
                 checkbox(l.clipboard_cb, self.clipboard_monitor)
                     .on_toggle(Message::ClipboardToggled)
-                    .size(16),
-            )
-            .padding(16)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(bg)),
-                border: iced::border::rounded(8),
-                ..Default::default()
-            }),
+                    .size(16)
+                    .into(),
+                bg,
+            ),
+        );
+
+        col = col.push(card(
+                column![
+                    checkbox(l.subtitles_cb, self.subtitles_enabled)
+                        .on_toggle(Message::SubtitlesToggled)
+                        .size(16),
+                    row![
+                        cjk_text(l.subtitle_langs_label).size(12),
+                        text_input(l.subtitle_langs_hint, &self.subtitle_langs)
+                            .on_input(Message::SubtitleLangsChanged)
+                            .padding(6)
+                            .size(12),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(8)
+                .into(),
+                bg,
+            ),
+        );
+
+        let ffmpeg_status = if downloader::detect_ffmpeg() {
+            l.ffmpeg_available
+        } else {
+            l.ffmpeg_missing
+        };
+        col = col.push(card(
+                row![
+                    cjk_text(l.ffmpeg_label).size(14),
+                    cjk_text(ffmpeg_status).size(12),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .into(),
+                bg,
+            ),
+        );
+
+        col = col.push(card(
+                {
+                    let mut cfg_col = column![
+                        button(cjk_text(l.save_config_btn).size(14))
+                            .padding(10)
+                            .on_press(Message::SaveConfig),
+                    ]
+                    .spacing(8);
+                    if self.config_saved {
+                        cfg_col = cfg_col.push(
+                            cjk_text(l.config_saved).size(11).color(iced::Color {
+                                r: 0.0, g: 0.6, b: 0.0, a: 1.0,
+                            }),
+                        );
+                    }
+                    cfg_col.into()
+                },
+                bg,
+            ),
         );
 
         container(scrollable(col)).height(Length::Fill).into()
@@ -1332,12 +1560,20 @@ fn is_video_url(text: &str) -> bool {
         "youtu.be/",
         "youtube.com/shorts",
         "youtube.com/playlist",
+        "youtube.com/live",
         "vimeo.com/",
         "bilibili.com/video",
+        "bilibili.com/list",
         "dailymotion.com/video",
         "twitch.tv/videos",
         "twitter.com/",
         "x.com/",
+        "tiktok.com/",
+        "instagram.com/",
+        "reddit.com/r/",
+        "douyin.com/",
+        "weibo.com/",
+        "acfun.cn/v/",
     ];
     let lower = text.to_lowercase();
     patterns.iter().any(|p| lower.contains(*p))

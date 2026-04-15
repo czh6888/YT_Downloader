@@ -1,7 +1,5 @@
-mod app;
-mod downloader;
-
-use app::App;
+use yt_downloader::app::App;
+use yt_downloader::downloader;
 use iced::application;
 
 /// Try to load CJK font bytes.
