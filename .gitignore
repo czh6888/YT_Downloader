@@ -1,0 +1,9 @@
+/target
+*.exe
+*.ttf
+*.bak
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
