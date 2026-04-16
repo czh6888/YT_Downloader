@@ -9,6 +9,7 @@ pub fn detect_ffmpeg() -> bool {
 }
 
 /// 使用 ffmpeg 转换文件格式。
+#[allow(dead_code)]
 pub fn convert_file(input_path: &str, output_format: &str) -> Result<String, String> {
     if !detect_ffmpeg() {
         return Err("ffmpeg 未安装".to_string());

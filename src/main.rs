@@ -2,21 +2,36 @@ use yt_downloader::app::App;
 use yt_downloader::downloader;
 use iced::application;
 
-/// Try to load CJK font bytes.
-fn load_default_font() -> Option<&'static [u8]> {
-    // Microsoft YaHei (extracted from TTC as proper TTF)
-    let candidates = [
+/// Load font bytes into cosmic-text's font database.
+fn load_fonts() -> Vec<(&'static [u8], &'static str)> {
+    let mut fonts = Vec::new();
+
+    // Primary CJK font: Microsoft YaHei
+    let cjk_candidates = [
         concat!(env!("CARGO_MANIFEST_DIR"), "\\assets\\msyh_regular.ttf"),
         "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\simhei.ttf",
     ];
-    for path in &candidates {
+    for path in &cjk_candidates {
         if let Ok(bytes) = std::fs::read(path) {
             let b: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-            return Some(b);
+            fonts.push((b, "Microsoft YaHei"));
+            break;
         }
     }
-    None
+
+    // Emoji/symbol font: Segoe UI Symbol (monochrome, cosmic-text compatible)
+    let emoji_candidates = [
+        "C:\\Windows\\Fonts\\seguisym.ttf",
+    ];
+    for path in &emoji_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            let b: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+            fonts.push((b, "Segoe UI Symbol"));
+            break;
+        }
+    }
+
+    fonts
 }
 
 /// Check if running with administrator privileges.
@@ -93,13 +108,13 @@ fn main() -> iced::Result {
         .antialiasing(false)
         .subscription(App::subscription);
 
-    // If CJK font available, load and set as default for all text
-    // .font() loads font bytes, .default_font() sets the default family
-    if let Some(_font_bytes) = load_default_font() {
-        settings = settings
-            .font(_font_bytes)
-            .default_font(iced::Font::with_name("Microsoft YaHei"));
+    // Load all fonts into cosmic-text's font database
+    let loaded = load_fonts();
+    for (font_bytes, _name) in &loaded {
+        settings = settings.font(*font_bytes);
     }
+    // Set Microsoft YaHei as default font for CJK support
+    settings = settings.default_font(iced::Font::with_name("Microsoft YaHei"));
 
     settings.run_with(App::new)
 }

@@ -79,6 +79,7 @@ pub async fn fetch_info(url: &str, cookie_args: &[String]) -> Result<Value> {
 }
 
 /// Download a video using yt-dlp. Returns log lines and final status.
+#[allow(dead_code)]
 pub async fn download(
     url: &str,
     cookie_args: &[String],
@@ -176,6 +177,7 @@ pub fn cookie_args(cookie_file: Option<&str>, browser_native: Option<&str>) -> V
 }
 
 /// Build format string for yt-dlp -f flag.
+#[allow(dead_code)]
 pub fn build_format_string(resolution: &str, best_format_id: Option<&str>) -> String {
     if resolution == "best" {
         "bestvideo+bestaudio/best".to_string()
@@ -199,6 +201,7 @@ pub fn build_format_string_from_id(format_id: &str) -> String {
 }
 
 /// Download with subtitle support.
+#[allow(dead_code)]
 pub async fn download_with_subtitles(
     url: &str,
     cookie_args: &[String],
@@ -311,6 +314,7 @@ fn which(name: &str) -> Option<PathBuf> {
 }
 
 /// Try to extract the downloaded file path from yt-dlp log output.
+#[allow(dead_code)]
 fn extract_file_path(log_lines: &[String], save_dir: &str) -> Option<String> {
     for line in log_lines.iter().rev() {
         if line.contains("[download]") && line.contains("has already been downloaded")

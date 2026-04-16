@@ -1,4 +1,3 @@
-use regex::Regex;
 use std::sync::LazyLock;
 
 /// Parsed download progress from yt-dlp output.
@@ -12,40 +11,58 @@ pub struct ProgressInfo {
     pub total: Option<u64>,       // bytes
 }
 
-// Matches lines like:
-// [download]  45.2% of ~  12.34MiB at    2.15MiB/s ETA 00:05
-// [download] 100% of  123.45MiB in 00:01:23
-static PROGRESS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"\[download\]\s+([\d.]+)%.*?(?:of\s+[~\s]*([\d.]+)([KMGT]?i?B))?\s*(?:at\s+([\d.]+)([KMGT]?i?B/s))?\s*(?:ETA\s+(\d{2}:\d{2}))?",
-    )
-    .unwrap()
+static PCT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\[download\].*?([\d.]+)%").unwrap()
+});
+
+static SIZE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"of\s+[~\s]*([\d.]+)\s*([KMGT]?i?B)").unwrap()
+});
+
+static SPEED_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"at\s+([\d.]+)\s*([KMGT]?i?B/s)").unwrap()
+});
+
+static ETA_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"ETA\s+(\d{1,2}):(\d{2})").unwrap()
 });
 
 /// Try to parse a yt-dlp output line as a progress update.
 pub fn parse_progress(line: &str) -> Option<ProgressInfo> {
-    let caps = PROGRESS_RE.captures(line)?;
+    // Must start with [download] and contain a percentage
+    if !line.contains("[download]") {
+        return None;
+    }
 
-    let percentage = caps.get(1)?.as_str().parse::<f64>().ok()?;
+    let percentage = PCT_RE.captures(line)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<f64>().ok())?;
 
-    let speed = caps.get(4).and_then(|m| m.as_str().parse::<f64>().ok());
-    let eta = caps.get(6).and_then(|m| parse_eta(m.as_str()));
+    let speed = SPEED_RE.captures(line)
+        .and_then(|c| {
+            let val = c.get(1)?.as_str().parse::<f64>().ok()?;
+            let unit = c.get(2)?.as_str();
+            Some(val * parse_size_unit(unit))
+        });
 
-    let (downloaded, total) = caps
-        .get(2)
-        .and_then(|m| m.as_str().parse::<f64>().ok())
-        .map(|val| {
-            let multiplier = caps
-                .get(3)
-                .map(|u| parse_size_unit(u.as_str()))
-                .unwrap_or(1.0);
-            let bytes = (val * multiplier) as u64;
+    let eta = ETA_RE.captures(line)
+        .and_then(|c| {
+            let mins = c.get(1)?.as_str().parse::<u64>().ok()?;
+            let secs = c.get(2)?.as_str().parse::<u64>().ok()?;
+            Some(mins * 60 + secs)
+        });
+
+    let (downloaded, total) = SIZE_RE.captures(line)
+        .and_then(|c| {
+            let val = c.get(1)?.as_str().parse::<f64>().ok()?;
+            let unit = c.get(2)?.as_str();
+            let bytes = (val * parse_size_unit(unit)) as u64;
             let total = if percentage > 0.0 {
                 Some((bytes as f64 / percentage * 100.0) as u64)
             } else {
                 None
             };
-            (Some(bytes), total)
+            Some((Some(bytes), total))
         })
         .unwrap_or((None, None));
 
@@ -58,17 +75,6 @@ pub fn parse_progress(line: &str) -> Option<ProgressInfo> {
     })
 }
 
-fn parse_eta(s: &str) -> Option<u64> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() == 2 {
-        let mins = parts[0].parse::<u64>().ok()?;
-        let secs = parts[1].parse::<u64>().ok()?;
-        Some(mins * 60 + secs)
-    } else {
-        None
-    }
-}
-
 fn parse_size_unit(unit: &str) -> f64 {
     match unit {
         "B" => 1.0,
@@ -77,5 +83,42 @@ fn parse_size_unit(unit: &str) -> f64 {
         "GiB" | "GB" => 1024.0 * 1024.0 * 1024.0,
         "TiB" | "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
         _ => 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_progress_full() {
+        let line = "[download]  45.2% of ~  12.34MiB at    2.15MiB/s ETA 00:05";
+        let p = parse_progress(line).unwrap();
+        assert!((p.percentage - 45.2).abs() < 0.01);
+        assert!(p.speed.is_some());
+        assert!(p.eta.is_some());
+        assert!(p.downloaded.is_some());
+    }
+
+    #[test]
+    fn test_parse_progress_pct_only() {
+        let line = "[download]  75.0%";
+        let p = parse_progress(line).unwrap();
+        assert!((p.percentage - 75.0).abs() < 0.01);
+        assert!(p.speed.is_none());
+        assert!(p.eta.is_none());
+    }
+
+    #[test]
+    fn test_parse_progress_with_eta() {
+        let line = "[download] 100% of 50.00MiB in 00:02";
+        let p = parse_progress(line).unwrap();
+        assert!((p.percentage - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_non_progress_line() {
+        let line = "[info] Video title here";
+        assert!(parse_progress(line).is_none());
     }
 }

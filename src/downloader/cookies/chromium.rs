@@ -165,7 +165,16 @@ pub fn extract_via_python(paths: &BrowserPaths, cookie_file: &PathBuf) -> Result
 
     log::info!("Using Python fallback: {:?}", script_path);
 
-    let python_cmds = ["python", "python3"];
+    // Try common Python paths (including elevated admin context where PATH may differ)
+    let python_cmds = [
+        "python", "python3",
+        // Common installation paths (try these when PATH doesn't have python)
+        "C:\\Python314\\python.exe",
+        "C:\\Python313\\python.exe",
+        "C:\\Python312\\python.exe",
+        "C:\\Python311\\python.exe",
+        "C:\\Python310\\python.exe",
+    ];
     let mut last_err = None;
 
     for cmd in &python_cmds {
