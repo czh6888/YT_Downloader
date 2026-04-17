@@ -47,16 +47,34 @@ pub fn find_yt_dlp() -> Option<Vec<String>> {
 }
 
 /// Fetch video info from yt-dlp as JSON.
-pub async fn fetch_info(url: &str, cookie_args: &[String]) -> Result<Value> {
+pub async fn fetch_info(url: &str, browsers: &[String]) -> Result<Value> {
+    let cookie_flags: Vec<String> = if browsers.is_empty() {
+        Vec::new()
+    } else {
+        let mut flags = Vec::new();
+        for browser in browsers {
+            flags.push("--cookies-from-browser".to_string());
+            flags.push(browser.clone());
+        }
+        flags
+    };
+    fetch_info_with_cookies(url, &cookie_flags).await
+}
+
+/// Fetch video info with pre-built cookie flags (from extract_cookies pipeline).
+pub async fn fetch_info_with_cookies(url: &str, cookie_flags: &[String]) -> Result<Value> {
     let yt_dlp = find_yt_dlp()
         .ok_or_else(|| anyhow!("yt-dlp not found. Install with: pip install yt-dlp"))?;
 
     let mut cmd = Command::new(&yt_dlp[0]);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
     cmd.args(&yt_dlp[1..])
         .arg("--no-warnings")
         .arg("--dump-json")
         .arg("--no-download")
-        .args(cookie_args)
+        .args(cookie_flags)
         .arg(url)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -101,6 +119,8 @@ pub async fn download(
     let output_template = format!("{save_dir}/%(title)s [%(id)s].%(ext)s");
 
     let mut cmd = Command::new(&yt_dlp[0]);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     cmd.args(&yt_dlp[1..])
         .arg("--newline")
         .arg("--progress")
@@ -224,6 +244,8 @@ pub async fn download_with_subtitles(
     let output_template = format!("{save_dir}/%(title)s [%(id)s].%(ext)s");
 
     let mut cmd = Command::new(&yt_dlp[0]);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     cmd.args(&yt_dlp[1..])
         .arg("--newline")
         .arg("--progress")

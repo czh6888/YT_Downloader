@@ -1,5 +1,5 @@
 /// Represents a downloadable format from yt-dlp output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[allow(dead_code)]
 pub struct FormatInfo {
     pub format_id: String,

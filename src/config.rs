@@ -32,6 +32,8 @@ pub struct GeneralConfig {
     pub merge_output_format: String,
     /// Audio-only mode
     pub audio_only: bool,
+    /// Show speed chart in download cards
+    pub show_speed_chart: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +158,7 @@ impl Default for GeneralConfig {
             output_template: "%(title)s [%(id)s].%(ext)s".to_string(),
             merge_output_format: "mp4".to_string(),
             audio_only: false,
+            show_speed_chart: true,
         }
     }
 }

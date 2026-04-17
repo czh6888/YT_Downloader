@@ -1,0 +1,56 @@
+[package]
+name = "app"
+version = "0.3.0"
+description = "YT Downloader - A modern yt-dlp GUI"
+authors = ["czh"]
+license = "MIT"
+repository = "https://github.com/czh6888/YT_Downloader_Rust_Plus"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tokio = { version = "1", features = ["process", "sync", "fs", "io-util", "rt-multi-thread", "time", "macros"] }
+tauri = { version = "2.10.3", features = ["devtools"] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-clipboard-manager = "2"
+anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+tempfile = "3"
+arboard = "3"
+windows-sys = { version = "0.59", features = [
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+data-encoding = "2"
+futures-lite = "2"
+open = "5"
+
+# Reference the parent crate's library
+yt-downloader = { path = ".." }

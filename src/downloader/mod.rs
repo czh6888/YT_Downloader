@@ -9,7 +9,7 @@ pub use formats::{FormatInfo, parse_formats};
 pub use post_process::detect_ffmpeg;
 pub use progress::parse_progress;
 pub use yt_dlp::{
-    DownloadResult, build_format_string_from_id, cookie_args, fetch_info, find_yt_dlp,
+    DownloadResult, build_format_string_from_id, cookie_args, fetch_info, fetch_info_with_cookies, find_yt_dlp,
 };
 
 /// Extract cookies from the specified browser.
